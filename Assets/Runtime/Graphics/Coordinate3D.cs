@@ -1,4 +1,4 @@
-namespace AnyG.Graphics
+namespace AnyG.Render
 {
     using Unity.Mathematics;
     using UnityEngine;
