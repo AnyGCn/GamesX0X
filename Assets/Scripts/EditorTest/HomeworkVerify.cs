@@ -152,9 +152,9 @@ public class HomeworkVerify
             cmd.DrawMesh(quadMesh, quadObject.transform.localToWorldMatrix, quadMaterial, 0, quadMaterial.FindPass("DepthOnly"));
             
             // Custom Draw
-            customDrawMaterial.SetMatrix(Homework2Constant._ModelMatrixCustomShaderId, Coordinate3D.GetModelMatrix(quadObject.transform));
-            customDrawMaterial.SetMatrix(Homework2Constant._ViewMatrixCustomShaderId, Coordinate3D.GetViewMatrix(cameraObject.transform));
-            customDrawMaterial.SetMatrix(Homework2Constant._ProjectionMatrixCustomShaderId, Coordinate3D.GetProjectionMatrix(cameraObject.GetComponent<Camera>()));
+            customDrawMaterial.SetMatrix(GlobalConstant._ModelMatrixCustomShaderId, Coordinate3D.GetModelMatrix(quadObject.transform));
+            customDrawMaterial.SetMatrix(GlobalConstant._ViewMatrixCustomShaderId, Coordinate3D.GetViewMatrix(cameraObject.transform));
+            customDrawMaterial.SetMatrix(GlobalConstant._ProjectionMatrixCustomShaderId, Coordinate3D.GetProjectionMatrix(cameraObject.GetComponent<Camera>()));
             
             cmd.SetRenderTarget(actualRT, RenderBufferLoadAction.DontCare, RenderBufferStoreAction.Store, RenderBufferLoadAction.DontCare, RenderBufferStoreAction.Store);
             cmd.ClearRenderTarget(true, true, Color.clear);
@@ -192,6 +192,99 @@ public class HomeworkVerify
         CoreUtils.Destroy(customDrawMaterial);
         CoreUtils.Destroy(quadMaterial);
         CoreUtils.Destroy(actualRT);
+        CoreUtils.Destroy(expectedRT);
+        
+        yield return null;
+    }
+    
+    // 通过与使用Unity自身提供的MVP矩阵及Shader绘制出的深度图的对比验证CPU渲染的正确性
+    [UnityTest]
+    public IEnumerator CPURender_Verify()
+    {
+        yield return null;
+        
+        int uselessColorTex = Shader.PropertyToID("_UselessColorTex");
+        int rtWidth = 480;
+        int rtHeight = 270;
+        
+        // Create Objects
+        GameObject cameraObject = new GameObject("Camera");
+        GameObject quadObject = GameObject.CreatePrimitive(PrimitiveType.Quad);
+        RenderTexture expectedRT = new RenderTexture(rtWidth, rtHeight, 16, GraphicsFormat.R32_SFloat);
+        Material quadMaterial = new Material(quadObject.GetComponent<MeshRenderer>().sharedMaterial);
+
+        Camera camera = cameraObject.AddComponent<Camera>();
+        Mesh quadMesh = quadObject.GetComponent<MeshFilter>().sharedMesh;
+        CPUShader shader = new CPUShader(quadMesh, rtWidth, rtHeight);
+        
+        quadMaterial.SetFloat("_Cull", 0);
+        
+        for (int execute = 0; execute < 1; ++execute)
+        {
+            // // Set the camera transform
+            // cameraObject.transform.position = new Vector3(0, 0, -5);
+            // cameraObject.transform.eulerAngles = new Vector3(0, 0, 0);
+            // camera.fieldOfView = 60;
+            // camera.nearClipPlane = 0.3f;
+            // camera.farClipPlane = 1000;
+            //
+            // // Set the cube transform
+            // quadObject.transform.position = new Vector3(0, 0, 0);
+            // quadObject.transform.eulerAngles = new Vector3(0, 0, 0);
+            // quadObject.transform.localScale = new Vector3(1, 1, 1);
+            
+            // Set the camera transform
+            cameraObject.transform.position = new Vector3(UnityEngine.Random.Range(-1, 1), UnityEngine.Random.Range(-1, 1), -10 + UnityEngine.Random.Range(-1, 1));
+            cameraObject.transform.eulerAngles = new Vector3(UnityEngine.Random.Range(-10, 10), UnityEngine.Random.Range(-10, 10), UnityEngine.Random.Range(-10, 10));
+            camera.fieldOfView = UnityEngine.Random.Range(50, 70);
+            camera.nearClipPlane = UnityEngine.Random.Range(0.1f, 1);
+            camera.farClipPlane = UnityEngine.Random.Range(100, 202);
+            
+            // Set the cube transform
+            quadObject.transform.position = new Vector3(UnityEngine.Random.Range(-1, 1), UnityEngine.Random.Range(-1, 1), UnityEngine.Random.Range(-1, 1));
+            quadObject.transform.eulerAngles = new Vector3(UnityEngine.Random.Range(-180, 180), UnityEngine.Random.Range(-180, 180), UnityEngine.Random.Range(-180, 180));
+            quadObject.transform.localScale = new Vector3(UnityEngine.Random.Range(1, 10), UnityEngine.Random.Range(1, 10), UnityEngine.Random.Range(1, 10));
+            
+            // Unity Draw
+            CommandBuffer cmd = CommandBufferPool.Get("DrawCube");
+            cmd.SetRenderTarget(expectedRT, RenderBufferLoadAction.DontCare, RenderBufferStoreAction.Store, RenderBufferLoadAction.DontCare, RenderBufferStoreAction.Store);
+            cmd.ClearRenderTarget(true, true, Color.clear);
+            cmd.SetGlobalMatrix("unity_MatrixVP", GL.GetGPUProjectionMatrix(camera.projectionMatrix, true) * camera.worldToCameraMatrix);
+            cmd.DrawMesh(quadMesh, quadObject.transform.localToWorldMatrix, quadMaterial, 0, quadMaterial.FindPass("DepthOnly"));
+            cmd.ReleaseTemporaryRT(uselessColorTex);
+            Graphics.ExecuteCommandBuffer(cmd);
+            CommandBufferPool.Release(cmd);
+
+            shader.ClearDepthBuffer();
+            shader.SetMatrix(Coordinate3D.GetModelMatrix(quadObject.transform), Coordinate3D.GetViewMatrix(cameraObject.transform), Coordinate3D.GetProjectionMatrix(camera));
+            shader.VertexShader();
+            shader.FragmentShader();
+            
+            Awaitable<AsyncGPUReadbackRequest>.Awaiter expected = AsyncGPUReadback.RequestAsync(expectedRT).GetAwaiter();
+            yield return new WaitUntil(() => expected.IsCompleted);
+
+            AsyncGPUReadbackRequest expectedResult = expected.GetResult();
+            
+            Assert.IsFalse(expectedResult.hasError);
+            NativeArray<float> expectedData = expectedResult.GetData<float>();
+            float[] actualData = shader.depthBuffer;
+            
+            bool isAllblack = true;
+            for (int i = 0; i < expectedData.Length; ++i)
+            {
+                if (expectedData[i] != 0)
+                    isAllblack = false;
+                Assert.That(actualData[i], Is.EqualTo(expectedData[i]).Using(FloatEqualityComparer.Instance),
+                    $"Index: {new Vector2(i % rtWidth, i / rtWidth)}, Expected: {expectedData[i]}, Actual: {actualData[i]}");
+            }
+            
+            Assert.IsFalse(isAllblack);
+        }
+        
+        // Destroy Objects
+        CoreUtils.Destroy(cameraObject);
+        CoreUtils.Destroy(quadObject);
+        CoreUtils.Destroy(quadMaterial);
         CoreUtils.Destroy(expectedRT);
         
         yield return null;
